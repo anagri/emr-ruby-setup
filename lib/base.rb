@@ -28,5 +28,5 @@ END
   exit 1
 end
 
-config.merge({:logger => Logger.new($stdout)})
+config.merge!({:logger => Logger.new($stdout)})
 AWS.config(config)

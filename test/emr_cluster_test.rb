@@ -6,11 +6,11 @@ describe EMRCluster do
   end
 
   it 'should launch keep alive cluster' do
-    emr_job_flow = @emr_cluster.launch(false)
-    emr_job_flow.state.should == 'WAITING'
+    @emr_job_flow = @emr_cluster.launch(false)
+    @emr_job_flow.state.should == 'WAITING'
   end
 
   after(:each) do
-    @emr_cluster.terminate
+    @emr_job_flow.terminate
   end
 end

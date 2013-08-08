@@ -21,6 +21,10 @@ class EMRJobFlow
   def state
     @job_flow.state
   end
+
+  def terminate
+    @job_flow.terminate
+  end
 end
 
 class EMRCluster
@@ -28,16 +32,23 @@ class EMRCluster
     @emr ||= AWS::EMR.new
     @name = name
     @keep_alive = keep_alive
+    @config = {
+        'log_uri' => 's3://sprinklr/ruby-sdk/logs/',
+        'instance_count' => 2,
+        'master_instance_type' => 'm1.small',
+        'slave_instance_type' => 'm1.small'
+    }.merge(config)
   end
 
   def launch(async = false)
     puts 'Launching EMR Cluster ...'
+
     job_flow = @emr.job_flows.create(@name, {
-        :log_uri => 's3://sprinklr/ruby-sdk/logs/',
+        :log_uri => @config['log_uri'],
         :instances => {
-            :instance_count => 2,
-            :master_instance_type => 'm1.small',
-            :slave_instance_type => 'm1.small',
+            :instance_count => @config['instance_count'],
+            :master_instance_type => @config['master_instance_type'],
+            :slave_instance_type => @config['slave_instance_type'],
             :keep_job_flow_alive_when_no_steps => @keep_alive,
             :ec2_key_name => 'emr'
         }
@@ -48,10 +59,6 @@ class EMRCluster
 
     emr_job_flow.wait_till_ready
     emr_job_flow
-  end
-
-  def terminate
-    @emr.job_flows.with_state('WAITING','STARTING', 'RUNNING').each(&:terminate)
   end
 
   def launch_hive
