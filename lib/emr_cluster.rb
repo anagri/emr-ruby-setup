@@ -1,12 +1,11 @@
-require 'base'
+require File.dirname(__FILE__) + '/base'
 
 class EMRJobFlow
-
   def initialize(job_flow)
     @job_flow = job_flow
   end
 
-  def wait_till_ready(timeout = 360)
+  def wait_till_ready(timeout = 600)
     total_time = 0
     wait_time = 60
     while total_time <= timeout && @job_flow.state != 'WAITING'
@@ -25,18 +24,27 @@ class EMRJobFlow
   def terminate
     @job_flow.terminate
   end
+
+  def step_details
+    @job_flow.step_details
+  end
 end
 
 class EMRCluster
+  attr_reader :steps
+
   def initialize(name='default-emr-cluster', keep_alive=false, config={})
     @emr ||= AWS::EMR.new
     @name = name
     @keep_alive = keep_alive
+    @steps = []
+    @launched_job_flows = []
     @config = {
         'log_uri' => 's3://sprinklr/ruby-sdk/logs/',
         'instance_count' => 2,
         'master_instance_type' => 'm1.small',
-        'slave_instance_type' => 'm1.small'
+        'slave_instance_type' => 'm1.small',
+        'hive_site_xml' => 's3://sprinklr/conf/hive/hive-site.xml'
     }.merge(config)
   end
 
@@ -51,67 +59,74 @@ class EMRCluster
             :slave_instance_type => @config['slave_instance_type'],
             :keep_job_flow_alive_when_no_steps => @keep_alive,
             :ec2_key_name => 'emr'
-        }
+        },
+        :steps => @steps
     })
 
     emr_job_flow = EMRJobFlow.new(job_flow)
+    @launched_job_flows << emr_job_flow
     return emr_job_flow if async
 
     emr_job_flow.wait_till_ready
     emr_job_flow
   end
 
-  def launch_hive
-    @emr.job_flows.create(
-        'emr-hive-sample',
+  def terminate
+    @launched_job_flows.each(&:terminate)
+  end
+
+  def with_hive
+    @steps += [
         {
-            :log_uri => 's3://sprinklr/ruby-sdk/logs/',
-            :instances => {
-                :instance_count => 2,
-                :master_instance_type => 'm1.small',
-                :slave_instance_type => 'm1.small',
-                :keep_job_flow_alive_when_no_steps => true,
-                :ec2_key_name => 'emr'
-            },
-            :steps => [
-                {
-                    :name => 'emr-hive-setup',
-                    :action_on_failure => 'TERMINATE_JOB_FLOW',
-                    :hadoop_jar_step => {
-                        :jar => "s3://us-east-1.elasticmapreduce/libs/script-runner/script-runner.jar",
-                        :args => [
-                            "s3://us-east-1.elasticmapreduce/libs/hive/hive-script",
-                            "--base-path", "s3://us-east-1.elasticmapreduce/libs/hive/",
-                            "--install-hive",
-                            "--hive-versions", "latest"
-                        ]
-                    }
-                },
-                {
-                    :name => 'emr-hive-site-setup',
-                    :action_on_failure => 'TERMINATE_JOB_FLOW',
-                    :hadoop_jar_step => {
-                        :jar => "s3://us-east-1.elasticmapreduce/libs/script-runner/script-runner.jar",
-                        :args => [
-                            "s3://us-east-1.elasticmapreduce/libs/hive/hive-script",
-                            "--base-path", "s3://us-east-1.elasticmapreduce/libs/hive/",
-                            "--install-hive-site", "--hive-site", "s3://sprinklr/conf/hive/hive-site.xml",
-                            "--hive-versions", "latest"
-                        ]
-                    }
-                },
-                {
-                    :name => 'show-hive-tables',
-                    :action_on_failure => 'CONTINUE',
-                    :hadoop_jar_step => {
-                        :jar => "s3://us-east-1.elasticmapreduce/libs/script-runner/script-runner.jar",
-                        :args => ["s3://us-east-1.elasticmapreduce/libs/hive/hive-script",
-                                  "--base-path", "s3://us-east-1.elasticmapreduce/libs/hive/",
-                                  "--hive-versions", "latest",
-                                  "--run-hive-script", "--args", "-f", "s3://sprinklr/ruby-sdk/hql/hsql-sample.q"]
-                    }
-                }]
-        })
+            :name => "#{@name}-emr-hive-setup",
+            :action_on_failure => 'TERMINATE_JOB_FLOW',
+            :hadoop_jar_step => {
+                :jar => "s3://us-east-1.elasticmapreduce/libs/script-runner/script-runner.jar",
+                :args => [
+                    "s3://us-east-1.elasticmapreduce/libs/hive/hive-script",
+                    "--base-path", "s3://us-east-1.elasticmapreduce/libs/hive/",
+                    "--install-hive",
+                    "--hive-versions", "latest"
+                ]
+            }
+        },
+        {
+            :name => "#{@name}-emr-hive-site-setup",
+            :action_on_failure => 'TERMINATE_JOB_FLOW',
+            :hadoop_jar_step => {
+                :jar => "s3://us-east-1.elasticmapreduce/libs/script-runner/script-runner.jar",
+                :args => [
+                    "s3://us-east-1.elasticmapreduce/libs/hive/hive-script",
+                    "--base-path", "s3://us-east-1.elasticmapreduce/libs/hive/",
+                    "--install-hive-site", "--hive-site", @config['hive_site_xml'],
+                    "--hive-versions", "latest"
+                ]
+            }
+        }]
+    self
+  end
+
+  def hive_job(name, hive_query_file, config = {})
+    throw 'Hive query file location is mandatory' if hive_query_file.nil?
+    config = config.merge
+    ({
+        'action_on_failure' => 'CONTINUE'
+    })
+
+    @steps += [
+        {
+            :name => name,
+            :action_on_failure => config['action_on_failure'],
+            :hadoop_jar_step => {
+                :jar => "s3://us-east-1.elasticmapreduce/libs/script-runner/script-runner.jar",
+                :args => ["s3://us-east-1.elasticmapreduce/libs/hive/hive-script",
+                          "--base-path", "s3://us-east-1.elasticmapreduce/libs/hive/",
+                          "--hive-versions", "latest",
+                          "--run-hive-script", "--args", "-f", hive_query_file]
+            }
+        }
+    ]
+    self
   end
 end
 
